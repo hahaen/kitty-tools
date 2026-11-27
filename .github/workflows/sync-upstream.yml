@@ -14,62 +14,27 @@ concurrency:
 
 jobs:
   sync:
-    if: github.repository == 'hahaen/kitty-tools'
+    if: >-
+      github.repository == 'hahaen/kitty-tools'
+      && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 5
     env:
       GH_TOKEN: ${{ github.token }}
       UPSTREAM_REPOSITORY: YyAdnBug/kitty-tools
+      FORK_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
-      - name: Sync branches and tags
+      - name: Sync the default branch
+        shell: bash
         run: |
-          python3 - <<'PY'
-          import json
-          import os
-          import subprocess
+          upstream_branch=$(git ls-remote --symref "https://github.com/${UPSTREAM_REPOSITORY}.git" HEAD |
+            awk '$1 == "ref:" && $3 == "HEAD" { sub(/^refs\/heads\//, "", $2); print $2 }')
 
-          def refs(repository):
-              result = subprocess.check_output(
-                  ['git', 'ls-remote', '--refs', '--heads', '--tags',
-                   f'https://github.com/{repository}.git'], text=True,
-              )
-              return dict((ref, sha) for sha, ref in
-                          (line.split('	', 1) for line in result.splitlines()))
+          if [[ -z "$upstream_branch" || "$upstream_branch" != "$FORK_DEFAULT_BRANCH" ]]; then
+            printf 'Upstream default branch "%s" differs from fork default branch "%s".\n' \
+              "$upstream_branch" "$FORK_DEFAULT_BRANCH" >&2
+            exit 1
+          fi
 
-          def post(endpoint, payload):
-              result = subprocess.run(
-                  ['gh', 'api', '--method', 'POST', endpoint, '--input', '-'],
-                  input=json.dumps(payload), text=True, capture_output=True,
-              )
-              if result.returncode:
-                  print(result.stderr.strip())
-                  return False
-              print(json.loads(result.stdout).get('message', 'Created ref'))
-              return True
-
-          repository = os.environ['GITHUB_REPOSITORY']
-          upstream = refs(os.environ['UPSTREAM_REPOSITORY'])
-          fork = refs(repository)
-          if not any(ref.startswith('refs/heads/') for ref in upstream):
-              raise SystemExit('No upstream branches found.')
-
-          failed = []
-          for ref, sha in sorted(upstream.items()):
-              if fork.get(ref) == sha:
-                  continue
-              print(f'Syncing {ref}', flush=True)
-              if ref not in fork:
-                  ok = post(f'repos/{repository}/git/refs', {'ref': ref, 'sha': sha})
-              elif ref.startswith('refs/heads/'):
-                  branch = ref.removeprefix('refs/heads/')
-                  ok = post(f'repos/{repository}/merge-upstream', {'branch': branch})
-              else:
-                  print('The existing fork tag points to a different object.')
-                  ok = False
-              if not ok:
-                  failed.append(ref)
-
-          print(f'Checked {len(upstream)} upstream branch and tag refs.')
-          if failed:
-              raise SystemExit('Sync failed for: ' + ', '.join(failed))
-          PY
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/merge-upstream" \
+            --raw-field "branch=${upstream_branch}"
